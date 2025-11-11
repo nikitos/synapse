@@ -555,7 +555,7 @@ class LoginRestServlet(RestServlet):
         Returns:
             The body of the JSON response.
         """
-        user_id, default_display_name = self.hs.get_jwt_handler().validate_login(
+        user_id, default_display_name = await self.hs.get_jwt_handler().validate_login(
             login_submission
         )
         return await self._complete_login(

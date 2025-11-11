@@ -42,7 +42,7 @@ class JwtHandler:
         self.jwt_audiences = hs.config.jwt.jwt_audiences
         self.http_client = hs.get_proxied_http_client()
 
-    def validate_login(self, login_submission: JsonDict) -> tuple[str, str | None]:
+    async def validate_login(self, login_submission: JsonDict) -> tuple[str, str | None]:
         """
         Authenticates the user for the /login API
 
@@ -70,12 +70,14 @@ class JwtHandler:
         if self.jwt_audiences is not None:
             claim_options["aud"] = {"values": self.jwt_audiences, "essential": True}
 
-        if await self.jwt_secret.startswith("http"):
-            self.jwt_secret = self.http_client.get_json(self.jwt_secret)
+        jwt_secret = self.jwt_secret
+        if self.jwt_secret.startswith("http"):
+            jwt_secret = await self.http_client.get_json(self.jwt_secret)
+
         try:
             claims = jwt.decode(
                 token,
-                key=self.jwt_secret,
+                key=jwt_secret,
                 claims_cls=JWTClaims,
                 claims_options=claim_options,
             )
