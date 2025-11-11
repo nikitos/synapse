@@ -70,7 +70,7 @@ class JwtHandler:
         if self.jwt_audiences is not None:
             claim_options["aud"] = {"values": self.jwt_audiences, "essential": True}
 
-        if self.jwt_secret.startswith("http"):
+        if await self.jwt_secret.startswith("http"):
             self.jwt_secret = self.http_client.get_json(self.jwt_secret)
         try:
             claims = jwt.decode(
