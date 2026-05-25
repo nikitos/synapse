@@ -58,6 +58,7 @@ from synapse.storage.database import DatabasePool, LoggingTransaction, make_conn
 from synapse.storage.databases.main import FilteringWorkerStore
 from synapse.storage.databases.main.account_data import AccountDataWorkerStore
 from synapse.storage.databases.main.client_ips import ClientIpBackgroundUpdateStore
+from synapse.storage.databases.main.delayed_events import DelayedEventsStore
 from synapse.storage.databases.main.deviceinbox import DeviceInboxBackgroundUpdateStore
 from synapse.storage.databases.main.devices import DeviceBackgroundUpdateStore
 from synapse.storage.databases.main.e2e_room_keys import EndToEndRoomKeyBackgroundStore
@@ -107,6 +108,7 @@ logger = logging.getLogger("synapse_port_db")
 BOOLEAN_COLUMNS = {
     "access_tokens": ["used"],
     "account_validity": ["email_sent"],
+    "delayed_events": ["is_processed"],
     "device_lists_changes_in_room": ["converted_to_destinations"],
     "device_lists_outbound_pokes": ["sent"],
     "devices": ["hidden"],
@@ -120,7 +122,7 @@ BOOLEAN_COLUMNS = {
     "presence_stream": ["currently_active"],
     "public_room_list_stream": ["visibility"],
     "pushers": ["enabled"],
-    "redactions": ["have_censored"],
+    "redactions": ["have_censored", "recheck"],
     "remote_media_cache": ["authenticated"],
     "room_memberships": ["participant"],
     "room_stats_state": ["is_federatable"],
@@ -134,6 +136,7 @@ BOOLEAN_COLUMNS = {
     "users": ["shadow_banned", "approved", "locked", "suspended"],
     "un_partial_stated_event_stream": ["rejection_status_changed"],
     "users_who_share_rooms": ["share_private"],
+    "quarantined_media_changes": ["quarantined"],
 }
 
 
@@ -272,6 +275,7 @@ class Store(
     RelationsWorkerStore,
     EventFederationWorkerStore,
     SlidingSyncStore,
+    DelayedEventsStore,
 ):
     def execute(self, f: Callable[..., R], *args: Any, **kwargs: Any) -> Awaitable[R]:
         return self.db_pool.runInteraction(f.__name__, f, *args, **kwargs)
@@ -908,6 +912,10 @@ class Porter:
             )
             await self._setup_autoincrement_sequence(
                 "state_groups_pending_deletion", "sequence_number"
+            )
+            await self._setup_sequence(
+                "quarantined_media_id_seq",
+                [("quarantined_media_changes", "stream_id")],
             )
 
             # Step 3. Get tables.

@@ -17,7 +17,6 @@ from typing import TYPE_CHECKING
 from urllib.parse import urlencode
 
 from pydantic import (
-    AnyHttpUrl,
     BaseModel,
     ConfigDict,
     StrictBool,
@@ -46,6 +45,7 @@ from synapse.synapse_rust.http_client import HttpClient
 from synapse.types import JsonDict, Requester, UserID, create_requester
 from synapse.util.caches.cached_call import RetryOnExceptionCachedCall
 from synapse.util.caches.response_cache import ResponseCache, ResponseCacheContext
+from synapse.util.duration import Duration
 from synapse.util.json import json_decoder
 
 from . import introspection_response_timer
@@ -111,6 +111,7 @@ class MasDelegatedAuth(BaseAuth):
         self._rust_http_client = HttpClient(
             reactor=hs.get_reactor(),
             user_agent=self._http_client.user_agent.decode("utf8"),
+            http2_only=self._config.force_http2,
         )
         self._server_metadata = RetryOnExceptionCachedCall[ServerMetadata](
             self._load_metadata
@@ -140,40 +141,20 @@ class MasDelegatedAuth(BaseAuth):
             clock=self._clock,
             name="mas_token_introspection",
             server_name=self.server_name,
-            timeout_ms=120_000,
+            timeout=Duration(minutes=2),
             # don't log because the keys are access tokens
             enable_logging=False,
         )
 
     @property
     def _metadata_url(self) -> str:
-        return str(
-            AnyHttpUrl.build(
-                scheme=self._config.endpoint.scheme,
-                username=self._config.endpoint.username,
-                password=self._config.endpoint.password,
-                host=self._config.endpoint.host or "",
-                port=self._config.endpoint.port,
-                path=".well-known/openid-configuration",
-                query=None,
-                fragment=None,
-            )
+        return (
+            f"{str(self._config.endpoint).rstrip('/')}/.well-known/openid-configuration"
         )
 
     @property
     def _introspection_endpoint(self) -> str:
-        return str(
-            AnyHttpUrl.build(
-                scheme=self._config.endpoint.scheme,
-                username=self._config.endpoint.username,
-                password=self._config.endpoint.password,
-                host=self._config.endpoint.host or "",
-                port=self._config.endpoint.port,
-                path="oauth2/introspect",
-                query=None,
-                fragment=None,
-            )
-        )
+        return f"{str(self._config.endpoint).rstrip('/')}/oauth2/introspect"
 
     async def _load_metadata(self) -> ServerMetadata:
         response = await self._http_client.get_json(self._metadata_url)

@@ -71,6 +71,10 @@ purge_room_tables_with_room_id_column = (
     # so must be deleted first.
     "sliding_sync_joined_rooms",
     "sliding_sync_membership_snapshots",
+    # Note: msc4242_state_dag_forward_extremities/edges have a foreign key to the `events` table
+    # so must be deleted first.
+    "msc4242_state_dag_forward_extremities",
+    "msc4242_state_dag_edges",
     "events",
     "federation_inbound_events_staging",
     "receipts_graph",
@@ -239,6 +243,16 @@ class PurgeEventsStore(StateGroupWorkerStore, CacheInvalidationWorkerStore):
 
         txn.execute("SELECT event_id, should_delete FROM events_to_purge")
         event_rows = txn.fetchall()
+
+        if len(event_rows) == 0:
+            logger.info("[purge] no events found to purge")
+
+            # For the sake of cleanliness: drop the temp table.
+            # This will commit the txn in sqlite, so make sure to keep this actually last.
+            txn.execute("DROP TABLE events_to_purge")
+            # no referenced state groups
+            return set()
+
         logger.info(
             "[purge] found %i events before cutoff, of which %i can be deleted",
             len(event_rows),

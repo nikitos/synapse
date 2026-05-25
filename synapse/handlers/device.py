@@ -58,6 +58,7 @@ from synapse.types import (
     DeviceListUpdates,
     JsonDict,
     JsonMapping,
+    MultiWriterStreamToken,
     ScheduledTask,
     StrCollection,
     StreamKeyType,
@@ -71,6 +72,7 @@ from synapse.util import stringutils
 from synapse.util.async_helpers import Linearizer
 from synapse.util.caches.expiringcache import ExpiringCache
 from synapse.util.cancellation import cancellable
+from synapse.util.duration import Duration
 from synapse.util.metrics import measure_func
 from synapse.util.retryutils import (
     NotRetryingDestination,
@@ -85,7 +87,7 @@ logger = logging.getLogger(__name__)
 
 DELETE_DEVICE_MSGS_TASK_NAME = "delete_device_messages"
 MAX_DEVICE_DISPLAY_NAME_LEN = 100
-DELETE_STALE_DEVICES_INTERVAL_MS = 24 * 60 * 60 * 1000
+DELETE_STALE_DEVICES_INTERVAL = Duration(days=1)
 
 
 def _check_device_name_length(name: str | None) -> None:
@@ -128,7 +130,6 @@ class DeviceHandler:
         self._auth_handler = hs.get_auth_handler()
         self._account_data_handler = hs.get_account_data_handler()
         self._event_sources = hs.get_event_sources()
-        self._msc3852_enabled = hs.config.experimental.msc3852_enabled
         self._query_appservices_for_keys = (
             hs.config.experimental.msc3984_appservice_key_query
         )
@@ -186,7 +187,7 @@ class DeviceHandler:
         ):
             self.clock.looping_call(
                 self.hs.run_as_background_process,
-                DELETE_STALE_DEVICES_INTERVAL_MS,
+                DELETE_STALE_DEVICES_INTERVAL,
                 desc="delete_stale_devices",
                 func=self._delete_stale_devices,
             )
@@ -289,6 +290,8 @@ class DeviceHandler:
             user_id: The user to delete devices from.
             device_ids: The list of device IDs to delete
         """
+        logger.info("Deleting devices %r for %r", list(device_ids), user_id)
+
         to_device_stream_id = self._event_sources.get_current_token().to_device_key
 
         try:
@@ -440,8 +443,8 @@ class DeviceHandler:
         user_id: str,
         device_id: str | None,
         device_data: JsonDict,
-        initial_device_display_name: str | None = None,
-        keys_for_device: JsonDict | None = None,
+        initial_device_display_name: str | None,
+        keys_for_device: JsonDict,
     ) -> str:
         """Store a dehydrated device for a user, optionally storing the keys associated with
         it as well.  If the user had a previous dehydrated device, it is removed.
@@ -471,46 +474,6 @@ class DeviceHandler:
             await self.delete_devices(user_id, [old_device_id])
 
         return device_id
-
-    async def rehydrate_device(
-        self, user_id: str, access_token: str, device_id: str
-    ) -> dict:
-        """Process a rehydration request from the user.
-
-        Args:
-            user_id: the user who is rehydrating the device
-            access_token: the access token used for the request
-            device_id: the ID of the device that will be rehydrated
-        Returns:
-            a dict containing {"success": True}
-        """
-        success = await self.store.remove_dehydrated_device(user_id, device_id)
-
-        if not success:
-            raise errors.NotFoundError()
-
-        # If the dehydrated device was successfully deleted (the device ID
-        # matched the stored dehydrated device), then modify the access
-        # token and refresh token to use the dehydrated device's ID and
-        # copy the old device display name to the dehydrated device,
-        # and destroy the old device ID
-        old_device_id = await self.store.set_device_for_access_token(
-            access_token, device_id
-        )
-        await self.store.set_device_for_refresh_token(user_id, old_device_id, device_id)
-        old_device = await self.store.get_device(user_id, old_device_id)
-        if old_device is None:
-            raise errors.NotFoundError()
-        await self.store.update_device(user_id, device_id, old_device["display_name"])
-        # can't call self.delete_device because that will clobber the
-        # access token so call the storage layer directly
-        await self.store.delete_devices(user_id, [old_device_id])
-
-        # tell everyone that the old device is gone and that the dehydrated
-        # device has a new display name
-        await self.notify_device_update(user_id, [old_device_id, device_id])
-
-        return {"success": True}
 
     async def delete_dehydrated_device(self, user_id: str, device_id: str) -> None:
         """
@@ -915,7 +878,7 @@ class DeviceHandler:
         )
 
     DEVICE_MSGS_DELETE_BATCH_LIMIT = 1000
-    DEVICE_MSGS_DELETE_SLEEP_MS = 100
+    DEVICE_MSGS_DELETE_SLEEP = Duration(milliseconds=100)
 
     async def _delete_device_messages(
         self,
@@ -941,9 +904,7 @@ class DeviceHandler:
             if from_stream_id is None:
                 return TaskStatus.COMPLETE, None, None
 
-            await self.clock.sleep(
-                DeviceWriterHandler.DEVICE_MSGS_DELETE_SLEEP_MS / 1000.0
-            )
+            await self.clock.sleep(DeviceWriterHandler.DEVICE_MSGS_DELETE_SLEEP)
 
 
 class DeviceWriterHandler(DeviceHandler):
@@ -1233,7 +1194,16 @@ class DeviceWriterHandler(DeviceHandler):
         changes = await self.store.get_device_list_changes_in_room(
             room_id, device_lists_stream_id
         )
-        local_changes = {(u, d) for u, d in changes if self.hs.is_mine_id(u)}
+        if changes is not None:
+            local_changes = {(u, d) for u, d in changes if self.hs.is_mine_id(u)}
+        else:
+            # The `device_lists_stream_id` is too old, so we need to fall back
+            # to looking for changes for all local users.
+            local_users = await self.store.get_local_users_in_room(room_id)
+            local_changes = await self.store.get_device_changes_for_users(
+                MultiWriterStreamToken(stream=device_lists_stream_id), local_users
+            )
+
         if not local_changes:
             return
 
@@ -1469,7 +1439,7 @@ class DeviceListUpdater(DeviceListWorkerUpdater):
         self._resync_retry_lock = Lock()
         self.clock.looping_call(
             self.hs.run_as_background_process,
-            30 * 1000,
+            Duration(seconds=30),
             func=self._maybe_retry_device_resync,
             desc="_maybe_retry_device_resync",
         )

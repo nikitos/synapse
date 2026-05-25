@@ -43,7 +43,10 @@ from synapse.replication.tcp.streams import (
     UnPartialStatedEventStream,
     UnPartialStatedRoomStream,
 )
-from synapse.replication.tcp.streams._base import ThreadSubscriptionsStream
+from synapse.replication.tcp.streams._base import (
+    StickyEventsStream,
+    ThreadSubscriptionsStream,
+)
 from synapse.replication.tcp.streams.events import (
     EventsStream,
     EventsStreamEventRow,
@@ -55,6 +58,7 @@ from synapse.replication.tcp.streams.partial_state import (
 )
 from synapse.types import PersistedEventPosition, ReadReceipt, StreamKeyType, UserID
 from synapse.util.async_helpers import Linearizer, timeout_deferred
+from synapse.util.duration import Duration
 from synapse.util.iterutils import batch_iter
 from synapse.util.metrics import Measure
 
@@ -173,7 +177,7 @@ class ReplicationDataHandler:
                 )
 
                 # Yield to reactor so that we don't block.
-                await self._clock.sleep(0)
+                await self._clock.sleep(Duration(seconds=0))
         elif stream_name == PushersStream.NAME:
             for row in rows:
                 if row.deleted:
@@ -260,6 +264,12 @@ class ReplicationDataHandler:
                 StreamKeyType.THREAD_SUBSCRIPTIONS,
                 token,
                 users=[row.user_id for row in rows],
+            )
+        elif stream_name == StickyEventsStream.NAME:
+            self.notifier.on_new_event(
+                StreamKeyType.STICKY_EVENTS,
+                token,
+                rooms=[row.room_id for row in rows],
             )
 
         await self._presence_handler.process_replication_rows(

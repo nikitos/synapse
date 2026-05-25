@@ -137,8 +137,8 @@ class Codes(str, Enum):
     PROFILE_TOO_LARGE = "M_PROFILE_TOO_LARGE"
     KEY_TOO_LARGE = "M_KEY_TOO_LARGE"
 
-    # Part of MSC4155
-    INVITE_BLOCKED = "ORG.MATRIX.MSC4155.M_INVITE_BLOCKED"
+    # Part of MSC4155/MSC4380
+    INVITE_BLOCKED = "M_INVITE_BLOCKED"
 
     # Part of MSC4190
     APPSERVICE_LOGIN_UNSUPPORTED = "IO.ELEMENT.MSC4190.M_APPSERVICE_LOGIN_UNSUPPORTED"
@@ -854,6 +854,12 @@ class HttpResponseException(CodeMessageException):
         errmsg = j.pop("error", self.msg)
 
         return ProxiedRequestError(self.code, errmsg, errcode, j)
+
+
+class HomeServerNotSetupException(Exception):
+    """
+    Raised when an operation is attempted on the HomeServer before setup() has been called.
+    """
 
 
 class ShadowBanError(Exception):

@@ -65,8 +65,6 @@ from typing import (
     Sequence,
 )
 
-from twisted.internet.interfaces import IDelayedCall
-
 from synapse.appservice import (
     ApplicationService,
     ApplicationServiceState,
@@ -78,7 +76,8 @@ from synapse.events import EventBase
 from synapse.logging.context import run_in_background
 from synapse.storage.databases.main import DataStore
 from synapse.types import DeviceListUpdates, JsonMapping
-from synapse.util.clock import Clock
+from synapse.util.clock import Clock, DelayedCallWrapper
+from synapse.util.duration import Duration
 
 if TYPE_CHECKING:
     from synapse.server import HomeServer
@@ -503,11 +502,11 @@ class _Recoverer:
         self.service = service
         self.callback = callback
         self.backoff_counter = 1
-        self.scheduled_recovery: IDelayedCall | None = None
+        self.scheduled_recovery: DelayedCallWrapper | None = None
 
     def recover(self) -> None:
-        delay = 2**self.backoff_counter
-        logger.info("Scheduling retries on %s in %fs", self.service.id, delay)
+        delay = Duration(seconds=2**self.backoff_counter)
+        logger.info("Scheduling retries on %s in %fs", self.service.id, delay.as_secs())
         self.scheduled_recovery = self.clock.call_later(
             delay,
             self.hs.run_as_background_process,
