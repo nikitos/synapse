@@ -889,11 +889,11 @@ class MasAuthDelegation(HomeserverTestCase):
             )
         )
 
-        self.assertEquals(requester.user.to_string(), USER_ID)
-        self.assertEquals(requester.device_id, DEVICE)
+        self.assertEqual(requester.user.to_string(), USER_ID)
+        self.assertEqual(requester.device_id, DEVICE)
         self.assertFalse(self.get_success(self._auth.is_server_admin(requester)))
 
-        self.assertEquals(
+        self.assertEqual(
             self.server.last_token_seen,
             "some_token",
         )
@@ -912,11 +912,11 @@ class MasAuthDelegation(HomeserverTestCase):
             )
         )
 
-        self.assertEquals(requester.user.to_string(), USER_ID)
-        self.assertEquals(requester.device_id, DEVICE)
+        self.assertEqual(requester.user.to_string(), USER_ID)
+        self.assertEqual(requester.device_id, DEVICE)
         self.assertFalse(self.get_success(self._auth.is_server_admin(requester)))
 
-        self.assertEquals(
+        self.assertEqual(
             self.server.last_token_seen,
             "some_token",
         )
@@ -1055,6 +1055,32 @@ class MasAuthDelegation(HomeserverTestCase):
         )
         # Ensure another introspection request was not sent
         self.assertEqual(self.server.calls, 1)
+
+
+class MasAuthDelegationWithSubpath(MasAuthDelegation):
+    """Test MAS delegation when the MAS server is hosted on a subpath."""
+
+    def default_config(self) -> dict[str, Any]:
+        config = super().default_config()
+        # Override the endpoint to include a subpath
+        config["matrix_authentication_service"]["endpoint"] = (
+            self.server.endpoint + "auth/path/"
+        )
+        return config
+
+    def test_introspection_endpoint_uses_subpath(self) -> None:
+        """Test that the introspection endpoint correctly uses the configured subpath."""
+        expected_introspection_url = (
+            self.server.endpoint + "auth/path/oauth2/introspect"
+        )
+        self.assertEqual(self._auth._introspection_endpoint, expected_introspection_url)
+
+    def test_metadata_url_uses_subpath(self) -> None:
+        """Test that the metadata URL correctly uses the configured subpath."""
+        expected_metadata_url = (
+            self.server.endpoint + "auth/path/.well-known/openid-configuration"
+        )
+        self.assertEqual(self._auth._metadata_url, expected_metadata_url)
 
 
 @parameterized_class(

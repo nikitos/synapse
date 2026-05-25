@@ -76,6 +76,7 @@ from synapse.logging.opentracing import active_span, start_active_span, trace_se
 from synapse.util.caches import intern_dict
 from synapse.util.cancellation import is_function_cancellable
 from synapse.util.clock import Clock
+from synapse.util.duration import Duration
 from synapse.util.iterutils import chunk_seq
 from synapse.util.json import json_encoder
 
@@ -334,7 +335,7 @@ class _AsyncResource(resource.Resource, metaclass=abc.ABCMeta):
                     callback_return = await self._async_render(request)
                 except LimitExceededError as e:
                     if e.pause:
-                        await self._clock.sleep(e.pause)
+                        await self._clock.sleep(Duration(seconds=e.pause))
                     raise
 
                 if callback_return is not None:
@@ -860,7 +861,18 @@ def respond_with_json(
         encoder = _encode_json_bytes
 
     request.setHeader(b"Content-Type", b"application/json")
-    request.setHeader(b"Cache-Control", b"no-cache, no-store, must-revalidate")
+    # Insert a default Cache-Control header if the servlet hasn't already set one. The
+    # default directive tells both the client and any intermediary cache to not cache
+    # the response, which is a sensible default to have on most API endpoints.
+    # The absence `Cache-Control` header would mean that it's up to the clients and
+    # caching proxies mood to cache things if they want. This can be dangerous, which is
+    # why we explicitly set a "don't cache by default" policy.
+    # In practice, `no-store` should be enough, but having all three directives is more
+    # conservative in case we encounter weird, non-spec compliant caches.
+    # See https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Cache-Control#directives
+    # for more details.
+    if not request.responseHeaders.hasHeader(b"Cache-Control"):
+        request.setHeader(b"Cache-Control", b"no-cache, no-store, must-revalidate")
 
     if send_cors:
         set_cors_headers(request)
@@ -900,7 +912,18 @@ def respond_with_json_bytes(
 
     request.setHeader(b"Content-Type", b"application/json")
     request.setHeader(b"Content-Length", b"%d" % (len(json_bytes),))
-    request.setHeader(b"Cache-Control", b"no-cache, no-store, must-revalidate")
+    # Insert a default Cache-Control header if the servlet hasn't already set one. The
+    # default directive tells both the client and any intermediary cache to not cache
+    # the response, which is a sensible default to have on most API endpoints.
+    # The absence `Cache-Control` header would mean that it's up to the clients and
+    # caching proxies mood to cache things if they want. This can be dangerous, which is
+    # why we explicitly set a "don't cache by default" policy.
+    # In practice, `no-store` should be enough, but having all three directives is more
+    # conservative in case we encounter weird, non-spec compliant caches.
+    # See https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Cache-Control#directives
+    # for more details.
+    if not request.responseHeaders.hasHeader(b"Cache-Control"):
+        request.setHeader(b"Cache-Control", b"no-cache, no-store, must-revalidate")
 
     if send_cors:
         set_cors_headers(request)

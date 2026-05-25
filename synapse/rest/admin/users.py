@@ -210,7 +210,7 @@ class UsersRestServletV3(UsersRestServletV2):
         return parse_boolean(request, "deactivated")
 
 
-class UserRestServletV2(RestServlet):
+class UserRestServletV2Get(RestServlet):
     PATTERNS = admin_patterns("/users/(?P<user_id>[^/]*)$", "v2")
 
     """Get request to list user details.
@@ -220,22 +220,6 @@ class UserRestServletV2(RestServlet):
 
     returns:
         200 OK with user details if success otherwise an error.
-
-    Put request to allow an administrator to add or modify a user.
-    This needs user to have administrator access in Synapse.
-    We use PUT instead of POST since we already know the id of the user
-    object to create. POST could be used to create guests.
-
-    PUT /_synapse/admin/v2/users/<user_id>
-    {
-        "password": "secret",
-        "displayname": "User"
-    }
-
-    returns:
-        201 OK with new user object if user was created or
-        200 OK with modified user object if user was modified
-        otherwise an error.
     """
 
     def __init__(self, hs: "HomeServer"):
@@ -266,6 +250,28 @@ class UserRestServletV2(RestServlet):
             raise NotFoundError("User not found")
 
         return HTTPStatus.OK, user_info_dict
+
+
+class UserRestServletV2(UserRestServletV2Get):
+    """
+    Put request to allow an administrator to add or modify a user.
+    This needs user to have administrator access in Synapse.
+    We use PUT instead of POST since we already know the id of the user
+    object to create. POST could be used to create guests.
+
+    Note: This inherits from `UserRestServletV2Get`, so also supports the `GET` route.
+
+    PUT /_synapse/admin/v2/users/<user_id>
+    {
+        "password": "secret",
+        "displayname": "User"
+    }
+
+    returns:
+        201 OK with new user object if user was created or
+        200 OK with modified user object if user was modified
+        otherwise an error.
+    """
 
     async def on_PUT(
         self, request: SynapseRequest, user_id: str
@@ -363,7 +369,7 @@ class UserRestServletV2(RestServlet):
         if user:  # modify user
             if "displayname" in body:
                 await self.profile_handler.set_displayname(
-                    target_user, requester, body["displayname"], True
+                    target_user, requester, body["displayname"], by_admin=True
                 )
 
             if threepids is not None:
@@ -412,7 +418,7 @@ class UserRestServletV2(RestServlet):
 
             if "avatar_url" in body:
                 await self.profile_handler.set_avatar_url(
-                    target_user, requester, body["avatar_url"], True
+                    target_user, requester, body["avatar_url"], by_admin=True
                 )
 
             if "admin" in body:
@@ -520,7 +526,7 @@ class UserRestServletV2(RestServlet):
 
             if "avatar_url" in body and isinstance(body["avatar_url"], str):
                 await self.profile_handler.set_avatar_url(
-                    target_user, requester, body["avatar_url"], True
+                    target_user, requester, body["avatar_url"], by_admin=True
                 )
 
             user_info_dict = await self.admin_handler.get_user(target_user)
@@ -1031,7 +1037,7 @@ class UserAdminServlet(RestServlet):
         return HTTPStatus.OK, {}
 
 
-class UserMembershipRestServlet(RestServlet):
+class UserJoinedRoomsRestServlet(RestServlet):
     """
     Get list of joined room ID's for a user.
     """
@@ -1052,6 +1058,28 @@ class UserMembershipRestServlet(RestServlet):
         rooms_response = {"joined_rooms": list(room_ids), "total": len(room_ids)}
 
         return HTTPStatus.OK, rooms_response
+
+
+class UserMembershipsRestServlet(RestServlet):
+    """
+    Get list of room memberships for a user.
+    """
+
+    PATTERNS = admin_patterns("/users/(?P<user_id>[^/]*)/memberships$")
+
+    def __init__(self, hs: "HomeServer"):
+        self.is_mine = hs.is_mine
+        self.auth = hs.get_auth()
+        self.store = hs.get_datastores().main
+
+    async def on_GET(
+        self, request: SynapseRequest, user_id: str
+    ) -> tuple[int, JsonDict]:
+        await assert_requester_is_admin(self.auth, request)
+
+        memberships = await self.store.get_memberships_for_user(user_id)
+
+        return HTTPStatus.OK, {"memberships": memberships}
 
 
 class PushersRestServlet(RestServlet):
@@ -1116,6 +1144,7 @@ class UserTokenRestServlet(RestServlet):
         self.store = hs.get_datastores().main
         self.auth = hs.get_auth()
         self.auth_handler = hs.get_auth_handler()
+        self.admin_handler = hs.get_admin_handler()
         self.is_mine_id = hs.is_mine_id
 
     async def on_POST(
@@ -1129,6 +1158,12 @@ class UserTokenRestServlet(RestServlet):
             raise SynapseError(
                 HTTPStatus.BAD_REQUEST, "Only local users can be logged in as"
             )
+
+        # Validate user_id
+        UserID.from_string(user_id)
+        _user_info_dict = await self.store.get_user_by_id(user_id)
+        if not _user_info_dict:
+            raise NotFoundError("User not found")
 
         body = parse_json_object_from_request(request, allow_empty_body=True)
 

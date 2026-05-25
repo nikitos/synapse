@@ -25,7 +25,7 @@ import collections
 import inspect
 import itertools
 import logging
-import typing
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from typing import (
     Any,
@@ -57,7 +57,9 @@ from synapse.logging.context import (
     run_coroutine_in_background,
     run_in_background,
 )
+from synapse.util.cancellation import cancellable
 from synapse.util.clock import Clock
+from synapse.util.duration import Duration
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +81,13 @@ class AbstractObservableDeferred(Generic[_T], metaclass=abc.ABCMeta):
 
         Note that the returned Deferred doesn't follow the Synapse logcontext rules -
         you will probably want to `make_deferred_yieldable` it.
+        """
+        ...
+
+    @abc.abstractmethod
+    def has_observers(self) -> bool:
+        """Returns True if there are any observers currently observing this
+        ObservableDeferred.
         """
         ...
 
@@ -121,6 +130,11 @@ class ObservableDeferred(Generic[_T], AbstractObservableDeferred[_T]):
             for observer in observers:
                 try:
                     observer.callback(r)
+                except defer.CancelledError:
+                    # We do not want to propagate cancellations to the original
+                    # deferred, or to other observers, so we can just ignore
+                    # this.
+                    pass
                 except Exception as e:
                     logger.exception(
                         "%r threw an exception on .callback(%r), ignoring...",
@@ -144,6 +158,11 @@ class ObservableDeferred(Generic[_T], AbstractObservableDeferred[_T]):
                 f.value.__failure__ = f
                 try:
                     observer.errback(f)
+                except defer.CancelledError:
+                    # We do not want to propagate cancellations to the original
+                    # deferred, or to other observers, so we can just ignore
+                    # this.
+                    pass
                 except Exception as e:
                     logger.exception(
                         "%r threw an exception on .errback(%r), ignoring...",
@@ -159,6 +178,7 @@ class ObservableDeferred(Generic[_T], AbstractObservableDeferred[_T]):
 
         deferred.addCallbacks(callback, errback)
 
+    @cancellable
     def observe(self) -> "defer.Deferred[_T]":
         """Observe the underlying deferred.
 
@@ -168,7 +188,7 @@ class ObservableDeferred(Generic[_T], AbstractObservableDeferred[_T]):
         """
         if not self._result:
             assert isinstance(self._observers, list)
-            d: "defer.Deferred[_T]" = defer.Deferred()
+            d: "defer.Deferred[_T]" = defer.Deferred(canceller=self._remove_observer)
             self._observers.append(d)
             return d
         elif self._result[0]:
@@ -178,6 +198,12 @@ class ObservableDeferred(Generic[_T], AbstractObservableDeferred[_T]):
 
     def observers(self) -> "Collection[defer.Deferred[_T]]":
         return self._observers
+
+    def has_observers(self) -> bool:
+        """Returns True if there are any observers currently observing this
+        ObservableDeferred.
+        """
+        return bool(self._observers)
 
     def has_called(self) -> bool:
         return self._result is not None
@@ -202,6 +228,28 @@ class ObservableDeferred(Generic[_T], AbstractObservableDeferred[_T]):
             self._result,
             self._deferred,
         )
+
+    def _remove_observer(self, observer: "defer.Deferred[_T]") -> None:
+        """Removes an observer from the list of observers.
+
+        Used as a canceller for the observer deferreds, so that if an observer
+        is cancelled it is removed from the list of observers.
+        """
+        if self._result is not None:
+            # The underlying deferred has already resolved, so the observer has
+            # already been resolved. Nothing to do.
+            return
+
+        assert isinstance(self._observers, list)
+        try:
+            self._observers.remove(observer)
+        except ValueError:
+            # The observer was not in the list. This can happen if the underlying
+            # deferred resolves at around the same time as we try to remove the
+            # observer. In this case, it's possible that we tried to remove the
+            # observer just after it was added to the list, but before it was
+            # resolved and removed from the list by the callback/errback above.
+            pass
 
 
 T = TypeVar("T")
@@ -524,7 +572,7 @@ class _LinearizerEntry:
     # The number of things executing.
     count: int
     # Deferreds for the things blocked from executing.
-    deferreds: typing.OrderedDict["defer.Deferred[None]", Literal[1]]
+    deferreds: OrderedDict["defer.Deferred[None]", Literal[1]]
 
 
 class Linearizer:
@@ -640,7 +688,7 @@ class Linearizer:
         # This needs to happen while we hold the lock. We could put it on the
         # exit path, but that would slow down the uncontended case.
         try:
-            await self._clock.sleep(0)
+            await self._clock.sleep(Duration(seconds=0))
         except CancelledError:
             self._release_lock(key, entry)
             raise
@@ -813,11 +861,14 @@ def timeout_deferred(
         # will have errbacked new_d, but in case it hasn't, errback it now.
 
         if not new_d.called:
-            new_d.errback(defer.TimeoutError("Timed out after %gs" % (timeout,)))
+            with PreserveLoggingContext():
+                new_d.errback(defer.TimeoutError("Timed out after %gs" % (timeout,)))
 
     # We don't track these calls since they are short.
     delayed_call = clock.call_later(
-        timeout, time_it_out, call_later_cancel_on_shutdown=cancel_on_shutdown
+        Duration(seconds=timeout),
+        time_it_out,
+        call_later_cancel_on_shutdown=cancel_on_shutdown,
     )
 
     def convert_cancelled(value: Failure) -> Failure:
@@ -840,11 +891,13 @@ def timeout_deferred(
 
     def success_cb(val: _T) -> None:
         if not new_d.called:
-            new_d.callback(val)
+            with PreserveLoggingContext():
+                new_d.callback(val)
 
     def failure_cb(val: Failure) -> None:
         if not new_d.called:
-            new_d.errback(val)
+            with PreserveLoggingContext():
+                new_d.errback(val)
 
     deferred.addCallbacks(success_cb, failure_cb)
 
@@ -946,12 +999,34 @@ def delay_cancellation(awaitable: Awaitable[T]) -> Awaitable[T]:
         # propagating. we then `unpause` it once the wrapped deferred completes, to
         # propagate the exception.
         new_deferred.pause()
-        new_deferred.errback(Failure(CancelledError()))
+        with PreserveLoggingContext():
+            new_deferred.errback(Failure(CancelledError()))
 
         deferred.addBoth(lambda _: new_deferred.unpause())
 
     new_deferred: "defer.Deferred[T]" = defer.Deferred(handle_cancel)
     deferred.chainDeferred(new_deferred)
+    return new_deferred
+
+
+def observe_deferred(d: "defer.Deferred[T]") -> "defer.Deferred[T]":
+    """Returns a new `Deferred` that observes the given `Deferred`.
+
+    The returned `Deferred` will resolve with the same result as the given
+    `Deferred`, but will not "chain" on the deferred so that using the returned
+    deferred does not affect the given `Deferred` in any way.
+    """
+    new_deferred: "defer.Deferred[T]" = defer.Deferred()
+
+    def callback(r: T) -> T:
+        new_deferred.callback(r)
+        return r
+
+    def errback(f: Failure) -> Failure:
+        new_deferred.errback(f)
+        return f
+
+    d.addCallbacks(callback, errback)
     return new_deferred
 
 
@@ -978,15 +1053,6 @@ class AwakenableSleeper:
         """Sleep for the given number of milliseconds, or return if the given
         `name` is explicitly woken up.
         """
-
-        # Create a deferred that gets called in N seconds
-        sleep_deferred: "defer.Deferred[None]" = defer.Deferred()
-        call = self._clock.call_later(
-            delay_ms / 1000,
-            sleep_deferred.callback,
-            None,
-        )
-
         # Create a deferred that will get called if `wake` is called with
         # the same `name`.
         stream_set = self._streams.setdefault(name, set())
@@ -996,13 +1062,14 @@ class AwakenableSleeper:
         try:
             # Wait for either the delay or for `wake` to be called.
             await make_deferred_yieldable(
-                defer.DeferredList(
-                    [sleep_deferred, notify_deferred],
-                    fireOnOneCallback=True,
-                    fireOnOneErrback=True,
-                    consumeErrors=True,
+                timeout_deferred(
+                    deferred=stop_cancellation(notify_deferred),
+                    timeout=delay_ms / 1000,
+                    clock=self._clock,
                 )
             )
+        except defer.TimeoutError:
+            pass
         finally:
             # Clean up the state
             curr_stream_set = self._streams.get(name)
@@ -1010,10 +1077,6 @@ class AwakenableSleeper:
                 curr_stream_set.discard(notify_deferred)
                 if len(curr_stream_set) == 0:
                     self._streams.pop(name)
-
-            # Cancel the sleep if we were woken up
-            if call.active():
-                call.cancel()
 
 
 class DeferredEvent:
